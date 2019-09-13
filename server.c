@@ -2,8 +2,16 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/sendfile.h>
 #include <netinet/in.h>
 #include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#include "utility_funcs.h"
+
 
 typedef struct{
     char *ext;
@@ -58,43 +66,135 @@ char* read_file (FILE *f)
     return buffer;
 }
 
-int main(int argc, char *argv)
+
+
+
+
+
+
+/* handle_connection (int cl_socket)
+   @cl_socket: Client Socket
+   Descripttion: This function handles the
+   requests coming from the client.
+*/
+int handle_connection (int cl_socket)
 {
-    FILE *html = NULL;
-    char* response_data = 0;
-    int server_socket = -1;
+    char request[1024];
+    char resource[1024];
+    char *ptr;
+    int fdl;
+    int length = 0;
 
-    typedef struct sockaddr_in InternetSocketAddress;
-    InternetSocketAddress isa;
+    if (recv_new(cl_socket, request) == 0) {
+        printf("Recieve failed.\n");
+    }
+    printf("%s\n", request);
+    ptr = strstr(request, "HTTP/");
+    if (ptr == NULL) {
+        printf("Not a valid HTTP request.\n");
+    } else {
+        *ptr = 0;
+        ptr = NULL;
 
-    html = fopen("index.html", "r");
-    response_data = read_file(html);
+        if (strncmp(request, "GET ", 4) == 0)
+            ptr = request + 4;
+        if (ptr == NULL) // in case above failed
+            printf("Unknown Request.\n");
+        else {
+            if(ptr[strlen(ptr) - 1] == '/') {
+                strcat(ptr, "index.html");
+            }
+            strcpy(resource, webroot());
+            int len = strlen(ptr);
+            ptr[len-1] = '\0'; //null terminate and trim the leading white spance
+            strcat(resource, ptr);
+            char *s = strchr(ptr, '.');
+            s = s+1;
+            int i;
+            for (i = 0; extn[i].ext != NULL; i++) {
+                if (strcmp(s, extn[i].ext) == 0) {
+                    fdl = open(resource, O_RDONLY, 0);
+                    printf("Opening \"%s\" resource.\n", resource);
+                    if(fdl == -1) {
+                        printf ("404 File not found Error\n");
+                        server_send(cl_socket, "Waqars Server\r\n\r\n");
+                        server_send(cl_socket, "<html><head>404 Not Found</head><body>404 Not found.</body></html>");
+                        close(cl_socket);
+                        return 0;
+                    }
+                    else {
+                        printf("200 Ok. Content Type: %s\n\n", extn[i].media_type);
+                        server_send(cl_socket, "HTTP/1.1 200 Ok\r\n");
+                        server_send(cl_socket, "Waqars Server\r\n\r\n");
+                        if (ptr == request + 4) { //if it's a GET request
+                            if ((length = get_file_size(fdl)) == -1)
+                                printf("Error getting file size\n");
+                            size_t total_bytes_sent = 0;
+                            ssize_t bytes_sent;
+                            while (total_bytes_sent < length) {
+                                //Zero Copy Optimization
+                                if ((bytes_sent = sendfile(
+                                    cl_socket, fdl, 0,
+                                    length - total_bytes_sent)) <= 0) {
+                                        if (errno == EINTR || errno == EAGAIN) {
+                                            continue;
+                                        }
+                                        perror("Sendfile");
+                                        return -1;
+                                    }
+                                total_bytes_sent += bytes_sent;
+                            }
+                        }
+                    }
+                    break;
+                }
+                int size = sizeof(extn) /sizeof(extn[0]);
+                if (i==size -2) {
+                    printf("415 Unsupported Media Type\n");
+                    server_send(cl_socket, "HTTP/1.1 415 Unsupported Media Type\r\n");
+                    //server_send(cl_socket, "Waqars Server\r\n\r\n");
+                    server_send(cl_socket, "<html><head>415 Unsupported Media Type</head><body>415 Unsupported Mediatype</body></html>");
+                }
+            }
+            close(cl_socket);
+        }
+    }
+    shutdown(cl_socket, SHUT_RDWR);
+    return 1;
+}
 
-    char http_header[2048] = "HTTP/1.1 200 OK\r\n\n";
-    strcat(http_header, response_data);
+int main(int argc, char *argv[])
+{
+    int server_socket;
+    int client_socket;
+
+    struct sockaddr_in serverAddress;
+    struct sockaddr_in clientAddress;
+    socklen_t clientAddressLength;
 
     //create the socket
     server_socket = socket (AF_INET, SOCK_STREAM, 0);
     
     //define the address
-    isa.sin_family = AF_INET;
-    isa.sin_port = htons(8001);
-    isa.sin_addr.s_addr = INADDR_ANY;
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(8001);
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
 
     //bind the socket
-    if(!bind(server_socket, (struct sockaddr*) &isa, sizeof(isa) )) {
+    if(!bind(server_socket, (struct sockaddr*) &serverAddress, 
+            sizeof(serverAddress))) {
         printf("Failed to bind socket");
     }
     listen(server_socket, 5);
-    http_header[2047] = '\0';
 
-    int client_socket;
     while(1) {
-        InternetSocketAddress client;
-        client_socket = accept(server_socket, NULL, NULL);
-        send (client_socket, http_header, sizeof(http_header), 0);
-        close(client_socket);
+        //create the client socket
+        client_socket = accept(server_socket,
+                              (struct sockaddr*)&clientAddress,
+                              &clientAddressLength); 
+        //server_send(client_socket, "HTTP/1.1 200 Ok\r\n\n<html><head>File</head><body>Hello</body></html>");
+        handle_connection(client_socket);
     }
-
     close(server_socket);
+    return 0;
 }

@@ -1,1 +1,4 @@
 server
+*.o
+conf
+root/
